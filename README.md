@@ -1,2 +1,1 @@
-# Transcript-Build
-CSV combinations generating Transcripts 
+# transcript-app
