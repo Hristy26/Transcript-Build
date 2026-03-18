@@ -146,6 +146,24 @@ COURSE_KEYWORDS = {
     "hazard":   "Hazard Communication",
 }
 
+# ── Status normalizer ─────────────────────────────────────────────────────────
+def normalize_status(raw: str) -> str:
+    """
+    Collapse any raw status string into one of three clean labels:
+      'Passed', 'In Progress', or 'Not Started'
+    """
+    s = raw.strip().lower()
+    if not s or s in ('-', 'nan', 'none', ''):
+        return 'Not Started'
+    # Passed variants
+    if any(k in s for k in ('pass', 'complet', 'finish', 'done', 'success')):
+        return 'Passed'
+    # Not started variants
+    if any(k in s for k in ('not start', 'not begun', 'pending', 'registered')):
+        return 'Not Started'
+    # Everything else → In Progress
+    return 'In Progress'
+
 def detect_course(filename, df):
     fn = filename.lower()
     for kw, name in COURSE_KEYWORDS.items():
@@ -176,18 +194,22 @@ def process_files(uploaded_files):
             email = str(row.get('Email', '')).strip()
             if not email or email == 'nan': continue
             key      = email.lower()
-            result   = str(row.get('Course result', '')).strip()
-            finished = str(row.get('Finished', '')).strip()
-            started  = str(row.get('Started',  '')).strip()
+            raw_result = str(row.get('Course result', '')).strip()
+            result     = normalize_status(raw_result)
+            finished   = str(row.get('Finished', '')).strip()
+            started    = str(row.get('Started',  '')).strip()
+
             def clean_date(d):
                 if d in ('', '-', 'nan', 'Not finished yet'): return None
                 try:    return pd.to_datetime(d).strftime('%m/%d/%Y')
                 except: return d
+
             ssn = None
             if ssn_col:
                 raw = str(row.get(ssn_col, '')).strip()
                 if raw and raw not in ('-', 'nan', ''):
                     ssn = raw
+
             if key not in people:
                 people[key] = {'name': name, 'email': email, 'ssn4': None, 'courses': []}
             if name and name != '-':
@@ -202,27 +224,46 @@ def process_files(uploaded_files):
             })
     return sorted(people.values(), key=lambda x: x['name'].lower()), course_names_seen
 
+# ── PDF color palette ─────────────────────────────────────────────────────────
+# Centralised so both color and grayscale modes are easy to read / tweak.
+def _pdf_palette(use_color: bool) -> dict:
+    if use_color:
+        return dict(
+            NAVY       = colors.HexColor('#1B3A6B'),
+            GOLD       = colors.HexColor('#C9A84C'),
+            # Passed  → rich green
+            PASS_BG    = colors.HexColor('#D7F0DB'),   # slightly deeper green fill
+            PASS_TEXT  = colors.HexColor('#1B5E20'),   # dark green text
+            # In Progress → warm orange
+            PROG_BG    = colors.HexColor('#FDEBD0'),   # orange-tinted fill
+            PROG_TEXT  = colors.HexColor('#BF360C'),   # deep orange text
+            # Not Started → neutral grey
+            NS_BG      = colors.HexColor('#F0F0F0'),
+            NS_TEXT    = colors.HexColor('#555555'),
+            GRAY_LT    = colors.HexColor('#F5F5F5'),
+            GRAY_BD    = colors.HexColor('#DDDDDD'),
+            TEXT       = colors.HexColor('#2C2C2C'),
+            WHITE      = colors.white,
+        )
+    else:
+        return dict(
+            NAVY       = colors.black,
+            GOLD       = colors.HexColor('#888888'),
+            PASS_BG    = colors.HexColor('#E8E8E8'),
+            PASS_TEXT  = colors.black,
+            PROG_BG    = colors.HexColor('#F0F0F0'),
+            PROG_TEXT  = colors.black,
+            NS_BG      = colors.HexColor('#F5F5F5'),
+            NS_TEXT    = colors.HexColor('#555555'),
+            GRAY_LT    = colors.HexColor('#F5F5F5'),
+            GRAY_BD    = colors.HexColor('#DDDDDD'),
+            TEXT       = colors.HexColor('#2C2C2C'),
+            WHITE      = colors.white,
+        )
+
 # ── PDF builder ───────────────────────────────────────────────────────────────
 def build_person_pdf(person, use_color=True) -> bytes:
-    if use_color:
-        NAVY      = colors.HexColor('#1B3A6B')
-        GOLD      = colors.HexColor('#C9A84C')
-        GREEN_DK  = colors.HexColor('#2E7D32')
-        GREEN_LT  = colors.HexColor('#E8F5E9')
-        ORANGE_DK = colors.HexColor('#E65100')
-        ORANGE_LT = colors.HexColor('#FFF3E0')
-    else:
-        NAVY      = colors.black
-        GOLD      = colors.HexColor('#888888')
-        GREEN_DK  = colors.black
-        GREEN_LT  = colors.HexColor('#F5F5F5')
-        ORANGE_DK = colors.black
-        ORANGE_LT = colors.HexColor('#EEEEEE')
-
-    GRAY_LT = colors.HexColor('#F5F5F5')
-    GRAY_BD = colors.HexColor('#DDDDDD')
-    WHITE   = colors.white
-    TEXT    = colors.HexColor('#2C2C2C')
+    p = _pdf_palette(use_color)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=letter,
@@ -230,26 +271,39 @@ def build_person_pdf(person, use_color=True) -> bytes:
         topMargin=0.5*inch, bottomMargin=0.65*inch)
 
     S = lambda n, **kw: ParagraphStyle(n, **kw)
-    title_s       = S('t',  fontName='Helvetica-Bold',    fontSize=20, textColor=WHITE,    alignment=TA_CENTER)
-    sub_s         = S('s',  fontName='Helvetica-Oblique', fontSize=10, textColor=GOLD,     alignment=TA_CENTER)
-    label_s       = S('l',  fontName='Helvetica-Bold',    fontSize=8,  textColor=NAVY)
-    value_s       = S('v',  fontName='Helvetica',         fontSize=9,  textColor=TEXT)
-    sec_s         = S('se', fontName='Helvetica-Bold',    fontSize=10, textColor=WHITE,    alignment=TA_LEFT)
-    course_s      = S('c',  fontName='Helvetica-Bold',    fontSize=10, textColor=TEXT)
-    status_pass_s = S('sp', fontName='Helvetica-Bold',    fontSize=9,  textColor=GREEN_DK)
-    status_prog_s = S('so', fontName='Helvetica-Bold',    fontSize=9,  textColor=ORANGE_DK)
-    date_s        = S('d',  fontName='Helvetica',         fontSize=9,  textColor=colors.HexColor('#666666'))
+    title_s    = S('t',  fontName='Helvetica-Bold',    fontSize=20, textColor=p['WHITE'],     alignment=TA_CENTER)
+    sub_s      = S('s',  fontName='Helvetica-Oblique', fontSize=10, textColor=p['GOLD'],      alignment=TA_CENTER)
+    label_s    = S('l',  fontName='Helvetica-Bold',    fontSize=8,  textColor=p['NAVY'])
+    value_s    = S('v',  fontName='Helvetica',         fontSize=9,  textColor=p['TEXT'])
+    sec_s      = S('se', fontName='Helvetica-Bold',    fontSize=10, textColor=p['WHITE'],     alignment=TA_LEFT)
+    course_s   = S('c',  fontName='Helvetica-Bold',    fontSize=10, textColor=p['TEXT'])
+    date_s     = S('d',  fontName='Helvetica',         fontSize=9,  textColor=colors.HexColor('#555555'))
+
+    # Status-specific text styles — colour chosen from palette
+    pass_s = S('sp', fontName='Helvetica-Bold', fontSize=9, textColor=p['PASS_TEXT'])
+    prog_s = S('so', fontName='Helvetica-Bold', fontSize=9, textColor=p['PROG_TEXT'])
+    ns_s   = S('sn', fontName='Helvetica-Bold', fontSize=9, textColor=p['NS_TEXT'])
+
+    def status_style(status):
+        if status == 'Passed':      return pass_s
+        if status == 'In Progress': return prog_s
+        return ns_s
+
+    def status_bg(status):
+        if status == 'Passed':      return p['PASS_BG']
+        if status == 'In Progress': return p['PROG_BG']
+        return p['NS_BG']
 
     story = []
 
-    # Header
+    # ── Header banner (navy) ──────────────────────────────────────────────────
     header_table = Table(
         [[Paragraph("TRAINING TRANSCRIPT", title_s)],
          [Paragraph("Construction Workforce Safety Training", sub_s)]],
         colWidths=[7.2*inch]
     )
     header_table.setStyle(TableStyle([
-        ('BACKGROUND',    (0,0), (-1,-1), NAVY),
+        ('BACKGROUND',    (0,0), (-1,-1), p['NAVY']),
         ('TOPPADDING',    (0,0), (-1,-1), 18),
         ('BOTTOMPADDING', (0,-1), (-1,-1), 18),
         ('LEFTPADDING',   (0,0), (-1,-1), 20),
@@ -258,31 +312,40 @@ def build_person_pdf(person, use_color=True) -> bytes:
     story.append(header_table)
     story.append(Spacer(1, 16))
 
-    # Worker info — 3 columns, SSN gets dedicated full-width cell
+    # ── Worker info block ─────────────────────────────────────────────────────
+    # Column widths: Name 2.0", Email 3.0", SSN 2.2"  (total 7.2")
+    # SSN column is deliberately wider so "•••• 1234" never clips.
     name_display = person['name'] or person['email']
-    ssn_val      = f"\u2022\u2022\u2022\u2022 {person['ssn4']}" if person.get('ssn4') else "\u2014"
+    ssn_val      = f"\u2022\u2022\u2022\u2022  {person['ssn4']}" if person.get('ssn4') else "\u2014"
+
     info_data = [
-        [Paragraph("EMPLOYEE",      label_s), Paragraph("EMAIL ADDRESS",  label_s), Paragraph("SSN \u2014 LAST 4", label_s)],
-        [Paragraph(name_display,    value_s), Paragraph(person['email'],  value_s), Paragraph(ssn_val,             value_s)],
+        [Paragraph("EMPLOYEE",     label_s),
+         Paragraph("EMAIL ADDRESS", label_s),
+         Paragraph("SSN \u2014 LAST 4", label_s)],
+        [Paragraph(name_display,   value_s),
+         Paragraph(person['email'], value_s),
+         Paragraph(ssn_val,         value_s)],
     ]
-    info_table = Table(info_data, colWidths=[2.2*inch, 3.3*inch, 1.7*inch])
+    info_table = Table(info_data, colWidths=[2.0*inch, 3.0*inch, 2.2*inch])
     info_table.setStyle(TableStyle([
-        ('BACKGROUND',    (0,0), (-1,0), GRAY_LT),
-        ('BACKGROUND',    (0,1), (-1,1), WHITE),
-        ('BOX',           (0,0), (-1,-1), 0.5, GRAY_BD),
-        ('INNERGRID',     (0,0), (-1,-1), 0.5, GRAY_BD),
+        ('BACKGROUND',    (0,0), (-1,0), p['GRAY_LT']),
+        ('BACKGROUND',    (0,1), (-1,1), p['WHITE']),
+        ('BOX',           (0,0), (-1,-1), 0.5, p['GRAY_BD']),
+        ('INNERGRID',     (0,0), (-1,-1), 0.5, p['GRAY_BD']),
         ('TOPPADDING',    (0,0), (-1,-1), 8),
         ('BOTTOMPADDING', (0,0), (-1,-1), 8),
         ('LEFTPADDING',   (0,0), (-1,-1), 10),
         ('RIGHTPADDING',  (0,0), (-1,-1), 10),
+        # Give SSN cell a very light gold tint so it stands out
+        ('BACKGROUND',    (2,1), (2,1), colors.HexColor('#FFFDF5') if use_color else p['WHITE']),
     ]))
     story.append(info_table)
     story.append(Spacer(1, 18))
 
-    # Section header
+    # ── Section header ────────────────────────────────────────────────────────
     sec_table = Table([[Paragraph("COURSE COMPLETIONS", sec_s)]], colWidths=[7.2*inch])
     sec_table.setStyle(TableStyle([
-        ('BACKGROUND',    (0,0), (-1,-1), NAVY),
+        ('BACKGROUND',    (0,0), (-1,-1), p['NAVY']),
         ('TOPPADDING',    (0,0), (-1,-1), 8),
         ('BOTTOMPADDING', (0,0), (-1,-1), 8),
         ('LEFTPADDING',   (0,0), (-1,-1), 12),
@@ -290,35 +353,42 @@ def build_person_pdf(person, use_color=True) -> bytes:
     story.append(sec_table)
     story.append(Spacer(1, 4))
 
-    # Course rows — full row colored by pass/fail
+    # ── Course rows ───────────────────────────────────────────────────────────
+    # Layout: Course name 3.0" | Status 1.1" | Started 1.5" | Completed 1.6"
     for c in person['courses']:
-        is_pass      = 'pass' in c['status'].lower()
-        row_bg       = GREEN_LT if is_pass else ORANGE_LT
-        status_s     = status_pass_s if is_pass else status_prog_s
-        status_label = c['status'] if c['status'] else '\u2014'
-        comp_date    = c['completion_date'] or '\u2014'
-        start_date   = c['started_date'] or '\u2014'
+        status     = c['status']           # already normalised
+        bg         = status_bg(status)
+        st_style   = status_style(status)
+        comp_date  = c['completion_date'] or '\u2014'
+        start_date = c['started_date']    or '\u2014'
 
         row_data = [[
-            Paragraph(c['course'], course_s),
-            Paragraph(status_label, status_s),
+            Paragraph(c['course'],             course_s),
+            Paragraph(status,                  st_style),
             Paragraph(f"Started: {start_date}", date_s),
             Paragraph(f"Completed: {comp_date}", date_s),
         ]]
-        row_table = Table(row_data, colWidths=[2.9*inch, 1.1*inch, 1.5*inch, 1.7*inch])
+        row_table = Table(row_data, colWidths=[3.0*inch, 1.1*inch, 1.5*inch, 1.6*inch])
         row_table.setStyle(TableStyle([
-            ('BACKGROUND',    (0,0), (-1,-1), row_bg),
+            ('BACKGROUND',    (0,0), (-1,-1), bg),
             ('TOPPADDING',    (0,0), (-1,-1), 10),
             ('BOTTOMPADDING', (0,0), (-1,-1), 10),
             ('LEFTPADDING',   (0,0), (-1,-1), 10),
-            ('RIGHTPADDING',  (0,0), (-1,-1), 6),
-            ('BOX',           (0,0), (-1,-1), 0.3, GRAY_BD),
+            ('RIGHTPADDING',  (0,0), (-1,-1), 8),
+            ('BOX',           (0,0), (-1,-1), 0.3, p['GRAY_BD']),
+            # Left accent stripe matching the status colour
+            ('LINEWIDTH',     (0,0), (0,-1), 3),
+            ('LINEBEFORE',    (0,0), (0,-1), 3,
+             p['PASS_TEXT'] if status == 'Passed'
+             else p['PROG_TEXT'] if status == 'In Progress'
+             else p['NS_TEXT']),
         ]))
         story.append(row_table)
         story.append(Spacer(1, 2))
 
+    # ── Footer ────────────────────────────────────────────────────────────────
     story.append(Spacer(1, 20))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=GOLD))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=p['GOLD']))
     story.append(Spacer(1, 6))
     footer_s = S('f', fontName='Helvetica-Oblique', fontSize=8,
                  textColor=colors.HexColor('#999999'), alignment=TA_CENTER)
@@ -355,12 +425,13 @@ def build_preview_html(person):
     ssn_display  = f"\u2022\u2022\u2022\u2022 {person['ssn4']}" if person.get('ssn4') else "\u2014"
     rows = ""
     for c in person['courses']:
-        status   = c['status'] if c['status'] else '\u2014'
+        status   = c['status']
         comp     = c['completion_date'] or '\u2014'
-        start    = c['started_date'] or '\u2014'
-        is_pass  = 'pass' in status.lower()
-        row_cls  = 'pass-row' if is_pass else 'prog-row'
-        stat_cls = 'cpass' if is_pass else 'cprog'
+        start    = c['started_date']    or '\u2014'
+        is_pass  = status == 'Passed'
+        is_prog  = status == 'In Progress'
+        row_cls  = 'pass-row' if is_pass else ('prog-row' if is_prog else 'ns-row')
+        stat_cls = 'cpass'    if is_pass else ('cprog'    if is_prog else 'cns')
         rows += f"""
         <div class="preview-course-row {row_cls}">
             <div class="cname">{c['course']}</div>
@@ -410,7 +481,7 @@ def build_clean_csv(people):
                 'Status':          c['status'],
                 'Started Date':    c.get('started_date') or '',
                 'Completion Date': c.get('completion_date') or '',
-                'Passed':          'Yes' if 'pass' in c['status'].lower() else 'No',
+                'Passed':          'Yes' if c['status'] == 'Passed' else 'No',
             })
     df = pd.DataFrame(rows, columns=[
         'Name','Email','SSN Last 4','Course','Status',
@@ -427,7 +498,7 @@ if 'use_color' not in st.session_state: st.session_state.use_color = True
 
 def require_data():
     if not st.session_state.people:
-        st.warning("⬆️ No data loaded yet — go to **Upload & Process** first.")
+        st.warning("\u2b06\ufe0f No data loaded yet \u2014 go to **Upload & Process** first.")
         return False
     return True
 
@@ -463,11 +534,10 @@ with st.sidebar:
         nav_html += f'<div class="nav-item {cls}">{icon}&nbsp;&nbsp;{label}</div>'
     st.markdown(nav_html, unsafe_allow_html=True)
 
-    # Loaded data summary
     if st.session_state.people:
-        ppl = st.session_state.people
-        crs = st.session_state.courses
-        passed_n = sum(1 for p in ppl if any('pass' in c['status'].lower() for c in p['courses']))
+        ppl      = st.session_state.people
+        crs      = st.session_state.courses
+        passed_n = sum(1 for p in ppl if any(c['status'] == 'Passed' for c in p['courses']))
         st.markdown(f"""
         <div style="padding:16px 12px 0;">
           <div style="background:rgba(255,255,255,0.08);border-radius:10px;padding:14px 16px;">
@@ -511,13 +581,13 @@ if page == "Upload & Process":
             st.session_state.people  = people
             st.session_state.courses = courses
 
-        passed = sum(1 for p in people if any('pass' in c['status'].lower() for c in p['courses']))
+        passed = sum(1 for p in people if any(c['status'] == 'Passed' for c in p['courses']))
         st.markdown(f"""
         <div class="stat-row">
             <div class="stat-box"><div class="stat-num">{len(people)}</div><div class="stat-label">Workers</div></div>
             <div class="stat-box"><div class="stat-num">{len(courses)}</div><div class="stat-label">Courses</div></div>
             <div class="stat-box"><div class="stat-num">{passed}</div><div class="stat-label">Passed</div></div>
-            <div class="stat-box"><div class="stat-num">{len(people)-passed}</div><div class="stat-label">In Progress</div></div>
+            <div class="stat-box"><div class="stat-num">{len(people)-passed}</div><div class="stat-label">In Progress / Not Started</div></div>
         </div>""", unsafe_allow_html=True)
 
         st.success(f"✅ Loaded {len(uploaded_files)} file(s). Use the sidebar to navigate.")
@@ -540,6 +610,13 @@ if page == "Upload & Process":
             <h4>Course keyword detection</h4>
             <p><b>asbestos</b> → Asbestos Awareness &nbsp;·&nbsp; <b>covid</b> → COVID-19 for the Construction Workforce<br>
             <b>lead</b> → Lead Awareness Worker &nbsp;·&nbsp; <b>hazard</b> → Hazard Communication</p>
+        </div>
+        <div class="info-card">
+            <h4>Status normalisation</h4>
+            <p>Raw status values are mapped to three clean labels used throughout the app and PDF:<br>
+            <b style="color:#1B5E20">Passed</b> &nbsp;·&nbsp;
+            <b style="color:#BF360C">In Progress</b> &nbsp;·&nbsp;
+            <b style="color:#555">Not Started</b></p>
         </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -549,7 +626,7 @@ elif page == "Preview Workers":
     st.markdown("""
     <div class="page-header">
         <h2>👥 Preview Workers</h2>
-        <p>Green rows = passed · Orange rows = in progress · Click 👁 to preview transcript</p>
+        <p>Green = Passed · Orange = In Progress · Click 👁 to preview transcript</p>
     </div>""", unsafe_allow_html=True)
 
     if not require_data(): st.stop()
@@ -561,25 +638,24 @@ elif page == "Preview Workers":
     with col_search:
         search_q = st.text_input("Search", placeholder="🔎  Search by name or email...", label_visibility="collapsed")
     with col_filter:
-        status_filter = st.selectbox("Status", ["All", "Passed", "In Progress"], label_visibility="collapsed")
+        status_filter = st.selectbox("Status", ["All", "Passed", "In Progress", "Not Started"], label_visibility="collapsed")
 
     filtered = people
     if search_q:
         q = search_q.lower()
         filtered = [p for p in filtered if q in p['name'].lower() or q in p['email'].lower()]
-    if status_filter == "Passed":
-        filtered = [p for p in filtered if any('pass' in c['status'].lower() for c in p['courses'])]
-    elif status_filter == "In Progress":
-        filtered = [p for p in filtered if not any('pass' in c['status'].lower() for c in p['courses'])]
+    if status_filter != "All":
+        filtered = [p for p in filtered if any(c['status'] == status_filter for c in p['courses'])]
 
     st.markdown(f'<div class="section-label">{len(filtered)} worker(s) shown</div>', unsafe_allow_html=True)
 
     for p in filtered:
-        is_pass   = any('pass' in c['status'].lower() for c in p['courses'])
-        row_cls   = 'pass' if is_pass else 'prog'
-        badge_cls = 'badge-pass' if is_pass else 'badge-prog'
-        badge_txt = 'PASSED' if is_pass else 'IN PROGRESS'
-        ssn_part  = f'<span class="worker-ssn">· ••••{p["ssn4"]}</span>' if p.get('ssn4') else ''
+        has_pass = any(c['status'] == 'Passed'      for c in p['courses'])
+        has_prog = any(c['status'] == 'In Progress' for c in p['courses'])
+        row_cls   = 'pass' if has_pass else ('prog' if has_prog else 'prog')
+        badge_cls = 'badge-pass' if has_pass else 'badge-prog'
+        badge_txt = 'PASSED' if has_pass else ('IN PROGRESS' if has_prog else 'NOT STARTED')
+        ssn_part  = f'<span class="worker-ssn">&nbsp;·&nbsp;••••&nbsp;{p["ssn4"]}</span>' if p.get('ssn4') else ''
 
         col_card, col_btn = st.columns([7, 1])
         with col_card:
@@ -601,7 +677,7 @@ elif page == "Generate PDFs":
     st.markdown("""
     <div class="page-header">
         <h2>📄 Generate PDFs</h2>
-        <p>Download transcripts for all workers — merged into one PDF or as individual files in a ZIP</p>
+        <p>Download transcripts for all workers — merged into one PDF or individual files in a ZIP</p>
     </div>""", unsafe_allow_html=True)
 
     if not require_data(): st.stop()
@@ -629,7 +705,7 @@ elif page == "Generate PDFs":
     with col2:
         st.markdown("""<div class="info-card"><h4>🗂 Individual ZIP</h4>
         <p>One PDF per worker, named by employee, packaged into a ZIP.</p></div>""", unsafe_allow_html=True)
-        if st.button(f"Package Individual PDFs (ZIP)", use_container_width=True):
+        if st.button("Package Individual PDFs (ZIP)", use_container_width=True):
             with st.spinner("Packaging..."):
                 zip_buf = io.BytesIO()
                 with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -694,11 +770,12 @@ elif page == "Batch Lookup":
         if matched:
             st.markdown('<div class="section-label">Matched Workers</div>', unsafe_allow_html=True)
             for p in matched:
-                is_pass   = any('pass' in c['status'].lower() for c in p['courses'])
-                row_cls   = 'pass' if is_pass else 'prog'
-                badge_cls = 'badge-pass' if is_pass else 'badge-prog'
-                badge_txt = 'PASSED' if is_pass else 'IN PROGRESS'
-                ssn_part  = f'<span class="worker-ssn">· ••••{p["ssn4"]}</span>' if p.get('ssn4') else ''
+                has_pass  = any(c['status'] == 'Passed'      for c in p['courses'])
+                has_prog  = any(c['status'] == 'In Progress' for c in p['courses'])
+                row_cls   = 'pass' if has_pass else 'prog'
+                badge_cls = 'badge-pass' if has_pass else 'badge-prog'
+                badge_txt = 'PASSED' if has_pass else ('IN PROGRESS' if has_prog else 'NOT STARTED')
+                ssn_part  = f'<span class="worker-ssn">&nbsp;·&nbsp;••••&nbsp;{p["ssn4"]}</span>' if p.get('ssn4') else ''
 
                 col_card, col_btn = st.columns([7, 1])
                 with col_card:
@@ -744,7 +821,7 @@ elif page == "Export CSV":
     st.markdown("""
     <div class="page-header">
         <h2>✏️ Export CSV</h2>
-        <p>A clean, fully-structured export with all fields — preview below before downloading</p>
+        <p>A clean, fully-structured export — preview below before downloading</p>
     </div>""", unsafe_allow_html=True)
 
     if not require_data(): st.stop()
@@ -767,13 +844,12 @@ elif page == "Export CSV":
                 'Status':          c['status'],
                 'Started Date':    c.get('started_date') or '',
                 'Completion Date': c.get('completion_date') or '',
-                'Passed':          'Yes' if 'pass' in c['status'].lower() else 'No',
+                'Passed':          'Yes' if c['status'] == 'Passed' else 'No',
             })
 
     preview_df = pd.DataFrame(preview_rows)
     st.markdown('<div class="section-label">Data Preview</div>', unsafe_allow_html=True)
     st.dataframe(preview_df, use_container_width=True, height=340)
-
     st.markdown(f'<div class="section-label">{len(preview_rows)} rows · {len(people)} workers · {len(st.session_state.courses)} courses</div>', unsafe_allow_html=True)
 
     st.download_button(
@@ -806,12 +882,20 @@ elif page == "Settings":
     st.markdown("""<div class="info-card"><h4>How course names are auto-detected</h4>
     <p>Keywords are matched against the uploaded filename and column headers. If no keyword matches, the filename is used as the course name.</p>
     </div>""", unsafe_allow_html=True)
-
     kw_df = pd.DataFrame([
         {"Keyword (filename / columns)": k, "Detected Course Name": v}
         for k, v in COURSE_KEYWORDS.items()
     ])
     st.dataframe(kw_df, use_container_width=True, hide_index=True)
+
+    st.markdown('<div class="section-label">Status Normalisation</div>', unsafe_allow_html=True)
+    st.markdown("""<div class="info-card"><h4>How raw status values are cleaned</h4>
+    <p>
+        Any value containing <b>pass / complet / finish / done / success</b> → <b style="color:#1B5E20">Passed</b><br>
+        Any value containing <b>not start / not begun / pending / registered</b> → <b style="color:#555">Not Started</b><br>
+        Everything else (including blank / dash) → <b style="color:#BF360C">In Progress</b>
+    </p>
+    </div>""", unsafe_allow_html=True)
 
     st.markdown('<div class="section-label">About</div>', unsafe_allow_html=True)
     st.markdown("""<div class="info-card"><h4>Training Transcript Generator</h4>
